@@ -1,0 +1,7 @@
+[project]
+name = "audiobooks"
+version = "0.1.0"
+description = "Convert PDFs into audioboks"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
