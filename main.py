@@ -3,6 +3,8 @@ import re
 
 from pypdf import PdfReader
 
+from tts_text_model import DEFAULT_MODEL, text_for_tts
+
 
 def chapter_entries(reader):
     for item in reader.outline:
@@ -47,6 +49,7 @@ def clean_page_lines(text, page_number):
 
 def clean_chapter_text(text):
     text = re.sub(r"\[\s*\d+(?:\s*,\s*\d+)*\s*\]", "", text)
+    text = DEFAULT_MODEL.fix_pdf_text_artifacts(text)
     text = re.sub(r"\bY\s+ou\b", "You", text)
     text = re.sub(r"\bY\s+our\b", "Your", text)
     text = re.sub(r"\bY\s+ear\b", "Year", text)
@@ -159,12 +162,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("pdf_path")
     parser.add_argument("chapter_number", nargs="?", type=int)
+    parser.add_argument(
+        "--tts",
+        action="store_true",
+        help="print chapter text transformed for TTS pronunciation",
+    )
     args = parser.parse_args()
 
     reader = PdfReader(args.pdf_path)
 
     if args.chapter_number is not None:
-        print(chapter_text(reader, args.chapter_number))
+        text = chapter_text(reader, args.chapter_number)
+        if args.tts:
+            text = text_for_tts(text)
+        print(text)
         return
 
     for chapter in chapter_entries(reader):
