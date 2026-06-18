@@ -2,7 +2,9 @@ import argparse
 import asyncio
 import re
 import sys
+import tempfile
 import wave
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from pypdf import PdfReader
@@ -226,6 +228,113 @@ async def synthesize_chapters(reader, chapters, output_path, voice, speed, overw
         await tts.stop()
 
 
+async def synthesize_chapter_file(pdf_path, chapter, output_path, voice, speed):
+    from trillim import TTS
+
+    reader = PdfReader(pdf_path)
+    chapter_number = chapter_number_from_title(chapter["title"])
+    text = text_for_tts(chapter_text(reader, chapter_number))
+
+    tts = TTS()
+    await tts.start()
+    try:
+        with open_wav(output_path) as wav_file:
+            async with tts.open_session(voice=voice, speed=speed) as session:
+                async for pcm_audio in session.synthesize(text):
+                    wav_file.writeframes(pcm_audio)
+    finally:
+        await tts.stop()
+
+
+def synthesize_chapter_worker(pdf_path, chapter, output_path, voice, speed):
+    print(f"synthesizing {chapter['title']}", file=sys.stderr)
+    asyncio.run(synthesize_chapter_file(pdf_path, chapter, output_path, voice, speed))
+    return output_path
+
+
+def append_wav(destination, source_path):
+    with wave.open(str(source_path), "rb") as source:
+        params = source.getparams()
+        expected = (PCM_CHANNELS, PCM_SAMPLE_WIDTH_BYTES, PCM_SAMPLE_RATE)
+        actual = (params.nchannels, params.sampwidth, params.framerate)
+        if actual != expected:
+            raise ValueError(
+                f"{source_path} has unsupported WAV parameters: "
+                f"channels={params.nchannels}, sample_width={params.sampwidth}, "
+                f"sample_rate={params.framerate}"
+            )
+
+        while True:
+            frames = source.readframes(PCM_SAMPLE_RATE)
+            if not frames:
+                break
+            destination.writeframes(frames)
+
+
+def synthesize_chapters_parallel(
+    pdf_path,
+    chapters,
+    output_path,
+    voice,
+    speed,
+    overwrite,
+    jobs,
+):
+    if output_path.exists() and not overwrite:
+        print(f"skipping existing {output_path}", file=sys.stderr)
+        return
+
+    if jobs < 1:
+        raise ValueError("--jobs must be at least 1")
+
+    if len(chapters) == 1 or jobs == 1:
+        reader = PdfReader(pdf_path)
+        asyncio.run(
+            synthesize_chapters(reader, chapters, output_path, voice, speed, overwrite)
+        )
+        return
+
+    worker_count = min(jobs, len(chapters))
+    with tempfile.TemporaryDirectory(prefix="audiobooks-") as temp_dir:
+        temp_dir = Path(temp_dir)
+        chapter_outputs = [
+            temp_dir / f"{position:04d}-{safe_filename(chapter['title'])}.wav"
+            for position, chapter in enumerate(chapters)
+        ]
+
+        print(
+            f"synthesizing {len(chapters)} chapters with {worker_count} processes",
+            file=sys.stderr,
+        )
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(
+                    synthesize_chapter_worker,
+                    str(pdf_path),
+                    chapter,
+                    str(chapter_outputs[position]),
+                    voice,
+                    speed,
+                )
+                for position, chapter in enumerate(chapters)
+            ]
+
+            completed = 0
+            for future in as_completed(futures):
+                future.result()
+                completed += 1
+                print(
+                    f"finished {completed}/{len(chapters)} chapters",
+                    file=sys.stderr,
+                )
+
+        with open_wav(output_path) as wav_file:
+            for chapter_output in chapter_outputs:
+                append_wav(wav_file, chapter_output)
+
+    print(f"wrote {output_path}", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("pdf_path")
@@ -234,6 +343,12 @@ def main():
     parser.add_argument("--output", type=Path, help="output WAV path")
     parser.add_argument("--voice", default="alba", help="Trillim voice to use")
     parser.add_argument("--speed", type=float, default=1.0, help="speech speed")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=4,
+        help="number of chapter synthesis processes to run at once",
+    )
     parser.add_argument("--overwrite", action="store_true", help="overwrite an existing WAV file")
     args = parser.parse_args()
 
@@ -257,15 +372,14 @@ def main():
             raise ValueError(f"Could not find chapter {args.chapter_number}")
 
     output_path = args.output or default_output_path(args.pdf_path, selected_chapters)
-    asyncio.run(
-        synthesize_chapters(
-            reader,
-            selected_chapters,
-            output_path,
-            args.voice,
-            args.speed,
-            args.overwrite,
-        )
+    synthesize_chapters_parallel(
+        args.pdf_path,
+        selected_chapters,
+        output_path,
+        args.voice,
+        args.speed,
+        args.overwrite,
+        args.jobs,
     )
 
 
