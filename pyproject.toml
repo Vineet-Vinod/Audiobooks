@@ -9,6 +9,6 @@ dependencies = [
     "ffmpeg-python>=0.2.0",
     "pydantic>=2.13.4",
     "pypdf>=6.13.3",
-    "trillim>=0.12.2",
+    "trillim[voice]>=0.12.2",
     "uvicorn[standard]>=0.40.0",
 ]
