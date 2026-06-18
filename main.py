@@ -193,6 +193,7 @@ def default_output_path(pdf_path, chapters):
 
 
 def open_wav(path):
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     wav_file = wave.open(str(path), "wb")
     try:
@@ -231,6 +232,7 @@ async def synthesize_chapters(reader, chapters, output_path, voice, speed, overw
 async def synthesize_chapter_file(pdf_path, chapter, output_path, voice, speed):
     from trillim import TTS
 
+    output_path = Path(output_path)
     reader = PdfReader(pdf_path)
     chapter_number = chapter_number_from_title(chapter["title"])
     text = text_for_tts(chapter_text(reader, chapter_number))
