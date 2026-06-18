@@ -180,40 +180,48 @@ def safe_filename(text):
     return text.strip("-") or "chapter"
 
 
-def output_path_for_chapter(output_dir, chapter):
-    chapter_number = chapter_number_from_title(chapter["title"])
-    filename = f"{chapter_number:02d}-{safe_filename(chapter['title'])}.wav"
-    return output_dir / filename
+def default_output_path(pdf_path, chapters):
+    pdf_path = Path(pdf_path)
+    if len(chapters) == 1:
+        chapter = chapters[0]
+        chapter_number = chapter_number_from_title(chapter["title"])
+        chapter_slug = safe_filename(chapter["title"])
+        return pdf_path.with_name(f"{pdf_path.stem}-{chapter_number:02d}-{chapter_slug}.wav")
+    return pdf_path.with_suffix(".wav")
 
 
-def write_wav(path, pcm_audio):
-    with wave.open(str(path), "wb") as wav_file:
+def open_wav(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wav_file = wave.open(str(path), "wb")
+    try:
         wav_file.setnchannels(PCM_CHANNELS)
         wav_file.setsampwidth(PCM_SAMPLE_WIDTH_BYTES)
         wav_file.setframerate(PCM_SAMPLE_RATE)
-        wav_file.writeframes(pcm_audio)
+        return wav_file
+    except Exception:
+        wav_file.close()
+        raise
 
 
-async def synthesize_chapters(reader, chapters, output_dir, voice, speed, overwrite):
+async def synthesize_chapters(reader, chapters, output_path, voice, speed, overwrite):
     from trillim import TTS
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if output_path.exists() and not overwrite:
+        print(f"skipping existing {output_path}", file=sys.stderr)
+        return
+
     tts = TTS()
     await tts.start()
     try:
-        async with tts.open_session(voice=voice, speed=speed) as session:
-            for chapter in chapters:
-                chapter_number = chapter_number_from_title(chapter["title"])
-                output_path = output_path_for_chapter(output_dir, chapter)
-
-                if output_path.exists() and not overwrite:
-                    print(f"skipping existing {output_path}", file=sys.stderr)
-                    continue
-
-                print(f"synthesizing {chapter['title']} -> {output_path}", file=sys.stderr)
-                text = text_for_tts(chapter_text(reader, chapter_number))
-                pcm_audio = await session.collect(text)
-                write_wav(output_path, pcm_audio)
+        with open_wav(output_path) as wav_file:
+            async with tts.open_session(voice=voice, speed=speed) as session:
+                for chapter in chapters:
+                    chapter_number = chapter_number_from_title(chapter["title"])
+                    print(f"synthesizing {chapter['title']}", file=sys.stderr)
+                    text = text_for_tts(chapter_text(reader, chapter_number))
+                    async for pcm_audio in session.synthesize(text):
+                        wav_file.writeframes(pcm_audio)
+        print(f"wrote {output_path}", file=sys.stderr)
     finally:
         await tts.stop()
 
@@ -223,10 +231,10 @@ def main():
     parser.add_argument("pdf_path")
     parser.add_argument("chapter_number", nargs="?", type=int)
     parser.add_argument("--list", action="store_true", help="list chapter names and page numbers")
-    parser.add_argument("--output-dir", type=Path, help="directory for generated WAV files")
+    parser.add_argument("--output", type=Path, help="output WAV path")
     parser.add_argument("--voice", default="alba", help="Trillim voice to use")
     parser.add_argument("--speed", type=float, default=1.0, help="speech speed")
-    parser.add_argument("--overwrite", action="store_true", help="overwrite existing WAV files")
+    parser.add_argument("--overwrite", action="store_true", help="overwrite an existing WAV file")
     args = parser.parse_args()
 
     reader = PdfReader(args.pdf_path)
@@ -248,14 +256,12 @@ def main():
         if not selected_chapters:
             raise ValueError(f"Could not find chapter {args.chapter_number}")
 
-    output_dir = args.output_dir or Path(args.pdf_path).with_suffix("").with_name(
-        f"{Path(args.pdf_path).stem}_audio"
-    )
+    output_path = args.output or default_output_path(args.pdf_path, selected_chapters)
     asyncio.run(
         synthesize_chapters(
             reader,
             selected_chapters,
-            output_dir,
+            output_path,
             args.voice,
             args.speed,
             args.overwrite,
